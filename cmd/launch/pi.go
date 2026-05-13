@@ -14,41 +14,79 @@ import (
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/cmd/internal/fileutil"
 	"github.com/ollama/ollama/envconfig"
+	"github.com/ollama/ollama/progress"
 	"github.com/ollama/ollama/types/model"
+	"golang.org/x/term"
 )
 
 // Pi implements Runner and Editor for Pi (Pi Coding Agent) integration
 type Pi struct{}
 
 const (
-	piNpmPackage      = "@mariozechner/pi-coding-agent"
-	piWebSearchSource = "npm:@ollama/pi-web-search"
-	piWebSearchPkg    = "@ollama/pi-web-search"
+	piNpmPackage       = "@earendil-works/pi-coding-agent"
+	piLegacyNpmPackage = "@mariozechner/pi-coding-agent"
+	piWebSearchSource  = "npm:@ollama/pi-web-search"
+	piWebSearchPkg     = "@ollama/pi-web-search"
 )
 
 func (p *Pi) String() string { return "Pi" }
 
 func (p *Pi) Run(model string, args []string) error {
-	fmt.Fprintf(os.Stderr, "\n%sPreparing Pi...%s\n", ansiGray, ansiReset)
+	status := newPiLaunchStatus()
+	defer status.StopAndClear()
+
+	status.Set("Preparing Pi...")
 	if err := ensureNpmInstalled(); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "%sChecking Pi installation...%s\n", ansiGray, ansiReset)
-	bin, err := ensurePiInstalled()
+	status.Set("Checking Pi installation...")
+	bin, err := ensurePiInstalledWithStatus(status)
 	if err != nil {
 		return err
 	}
 
-	ensurePiWebSearchPackage(bin)
+	ensurePiWebSearchPackageWithStatus(bin, status)
 
-	fmt.Fprintf(os.Stderr, "\n%sLaunching Pi...%s\n\n", ansiGray, ansiReset)
+	status.Set("Launching Pi...")
+	status.StopAndClear()
 
 	cmd := exec.Command(bin, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+type piLaunchStatus struct {
+	progress *progress.Progress
+	spinner  *progress.Spinner
+}
+
+func newPiLaunchStatus() *piLaunchStatus {
+	return &piLaunchStatus{}
+}
+
+func (s *piLaunchStatus) Set(message string) {
+	if s == nil || !term.IsTerminal(int(os.Stderr.Fd())) {
+		return
+	}
+	if s.progress == nil {
+		s.progress = progress.NewProgress(os.Stderr)
+		s.spinner = progress.NewSpinner(message)
+		s.progress.Add("pi", s.spinner)
+		return
+	}
+	s.spinner.SetMessage(message)
+}
+
+func (s *piLaunchStatus) StopAndClear() {
+	if s == nil || s.progress == nil {
+		return
+	}
+	s.progress.StopAndClear()
+	s.progress = nil
+	s.spinner = nil
 }
 
 func ensureNpmInstalled() error {
@@ -59,7 +97,37 @@ func ensureNpmInstalled() error {
 }
 
 func ensurePiInstalled() (string, error) {
+	return ensurePiInstalledWithStatus(nil)
+}
+
+func ensurePiInstalledWithStatus(status *piLaunchStatus) (string, error) {
 	if _, err := exec.LookPath("pi"); err == nil {
+		pkg, pkgErr := installedPiPackage()
+		if pkgErr != nil {
+			status.StopAndClear()
+			fmt.Fprintf(os.Stderr, "%sCould not verify which Pi package is installed: %v%s\n", ansiYellow, pkgErr, ansiReset)
+			fmt.Fprintf(os.Stderr, "Pi will still launch. To switch to the official package manually:\n  npm uninstall -g %s\n  npm install -g %s\n\n", piLegacyNpmPackage, piNpmPackage)
+			return "pi", nil
+		}
+
+		if pkg == piLegacyNpmPackage {
+			status.StopAndClear()
+			ok, err := ConfirmPrompt("Switch Pi to the official package? Your settings and extensions will be kept.")
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				return "", fmt.Errorf("pi migration cancelled\n\nTo migrate later, re-run:\n  ollama launch pi\n\nOr migrate manually:\n  npm uninstall -g %s\n  npm install -g %s", piLegacyNpmPackage, piNpmPackage)
+			}
+
+			status.Set("Updating Pi...")
+			if err := uninstallLegacyPiPackage(); err != nil {
+				return "", err
+			}
+			if err := installPiPackage(); err != nil {
+				return "", err
+			}
+		}
 		return "pi", nil
 	}
 
@@ -67,7 +135,8 @@ func ensurePiInstalled() (string, error) {
 		return "", fmt.Errorf("pi is not installed and required dependencies are missing\n\nInstall the following first:\n  npm (Node.js): https://nodejs.org/\n\nThen re-run:\n  ollama launch pi")
 	}
 
-	ok, err := ConfirmPrompt("Pi is not installed. Install with npm?")
+	status.StopAndClear()
+	ok, err := ConfirmPrompt("Install Pi with npm?")
 	if err != nil {
 		return "", err
 	}
@@ -75,60 +144,133 @@ func ensurePiInstalled() (string, error) {
 		return "", fmt.Errorf("pi installation cancelled")
 	}
 
-	fmt.Fprintf(os.Stderr, "\nInstalling Pi...\n")
-	cmd := exec.Command("npm", "install", "-g", piNpmPackage+"@latest")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to install pi: %w", err)
+	status.Set("Installing Pi...")
+	if err := installPiPackage(); err != nil {
+		return "", err
 	}
 
 	if _, err := exec.LookPath("pi"); err != nil {
 		return "", fmt.Errorf("pi was installed but the binary was not found on PATH\n\nYou may need to restart your shell")
 	}
 
-	fmt.Fprintf(os.Stderr, "%sPi installed successfully%s\n\n", ansiGreen, ansiReset)
 	return "pi", nil
 }
 
-func ensurePiWebSearchPackage(bin string) {
+func installPiPackage() error {
+	if err := runQuietCommand("npm", "install", "-g", piNpmPackage+"@latest"); err != nil {
+		return fmt.Errorf("failed to install pi: %w", err)
+	}
+	return nil
+}
+
+func uninstallLegacyPiPackage() error {
+	if err := runQuietCommand("npm", "uninstall", "-g", piLegacyNpmPackage); err != nil {
+		return fmt.Errorf("failed to remove legacy pi package: %w", err)
+	}
+	return nil
+}
+
+func runQuietCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, msg)
+}
+
+func installedPiPackage() (string, error) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		return "", err
+	}
+
+	installed, err := npmPackageInstalled(piNpmPackage)
+	if err != nil {
+		return "", err
+	}
+	if installed {
+		return piNpmPackage, nil
+	}
+
+	installed, err = npmPackageInstalled(piLegacyNpmPackage)
+	if err != nil {
+		return "", err
+	}
+	if installed {
+		return piLegacyNpmPackage, nil
+	}
+
+	return "", nil
+}
+
+func npmPackageInstalled(pkg string) (bool, error) {
+	cmd := exec.Command("npm", "ls", "-g", pkg, "--depth=0", "--json")
+	out, err := cmd.Output()
+
+	var payload struct {
+		Dependencies map[string]json.RawMessage `json:"dependencies"`
+	}
+
+	if parseErr := json.Unmarshal(out, &payload); parseErr == nil {
+		_, ok := payload.Dependencies[pkg]
+		if ok {
+			return true, nil
+		}
+		return false, nil
+	}
+
+	if err == nil {
+		return false, nil
+	}
+
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		msg := strings.TrimSpace(string(exitErr.Stderr))
+		if msg == "" {
+			msg = strings.TrimSpace(string(out))
+		}
+		if msg == "" {
+			return false, err
+		}
+		return false, fmt.Errorf("%w: %s", err, msg)
+	}
+
+	return false, err
+}
+
+func ensurePiWebSearchPackageWithStatus(bin string, status *piLaunchStatus) {
 	if !shouldManagePiWebSearch() {
-		fmt.Fprintf(os.Stderr, "%sCloud is disabled; skipping %s setup.%s\n", ansiGray, piWebSearchPkg, ansiReset)
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "%sChecking Pi web search package...%s\n", ansiGray, ansiReset)
+	status.Set("Checking Pi web search package...")
 
 	installed, err := piPackageInstalled(bin, piWebSearchSource)
 	if err != nil {
+		status.StopAndClear()
 		fmt.Fprintf(os.Stderr, "%s  Warning: could not check %s installation: %v%s\n", ansiYellow, piWebSearchPkg, err, ansiReset)
 		return
 	}
 
 	if !installed {
-		fmt.Fprintf(os.Stderr, "%sInstalling %s...%s\n", ansiGray, piWebSearchPkg, ansiReset)
-		cmd := exec.Command(bin, "install", piWebSearchSource)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+		status.Set("Installing " + piWebSearchPkg + "...")
+		if err := runQuietCommand(bin, "install", piWebSearchSource); err != nil {
+			status.StopAndClear()
 			fmt.Fprintf(os.Stderr, "%s  Warning: could not install %s: %v%s\n", ansiYellow, piWebSearchPkg, err, ansiReset)
 			return
 		}
-
-		fmt.Fprintf(os.Stderr, "%s  ✓ Installed %s%s\n", ansiGreen, piWebSearchPkg, ansiReset)
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "%sUpdating %s...%s\n", ansiGray, piWebSearchPkg, ansiReset)
-	cmd := exec.Command(bin, "update", piWebSearchSource)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	status.Set("Updating " + piWebSearchPkg + "...")
+	if err := runQuietCommand(bin, "update", piWebSearchSource); err != nil {
+		status.StopAndClear()
 		fmt.Fprintf(os.Stderr, "%s  Warning: could not update %s: %v%s\n", ansiYellow, piWebSearchPkg, err, ansiReset)
 		return
 	}
-
-	fmt.Fprintf(os.Stderr, "%s  ✓ Updated %s%s\n", ansiGreen, piWebSearchPkg, ansiReset)
 }
 
 func shouldManagePiWebSearch() bool {
