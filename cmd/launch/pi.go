@@ -73,11 +73,10 @@ func (s *piLaunchStatus) Set(message string) {
 	}
 	if s.progress == nil {
 		s.progress = progress.NewProgress(os.Stderr)
-		s.spinner = progress.NewSpinner(message)
+		s.spinner = progress.NewSpinner("")
 		s.progress.Add("pi", s.spinner)
 		return
 	}
-	s.spinner.SetMessage(message)
 }
 
 func (s *piLaunchStatus) StopAndClear() {
@@ -103,14 +102,7 @@ func ensurePiInstalled() (string, error) {
 func ensurePiInstalledWithStatus(status *piLaunchStatus) (string, error) {
 	if _, err := exec.LookPath("pi"); err == nil {
 		pkg, pkgErr := installedPiPackage()
-		if pkgErr != nil {
-			status.StopAndClear()
-			fmt.Fprintf(os.Stderr, "%sCould not verify which Pi package is installed: %v%s\n", ansiYellow, pkgErr, ansiReset)
-			fmt.Fprintf(os.Stderr, "Pi will still launch. To switch to the official package manually:\n  npm uninstall -g %s\n  npm install -g %s\n\n", piLegacyNpmPackage, piNpmPackage)
-			return "pi", nil
-		}
-
-		if pkg == piLegacyNpmPackage {
+		if pkgErr == nil && pkg == piLegacyNpmPackage {
 			status.StopAndClear()
 			ok, err := ConfirmPrompt("Switch Pi to the official package? Your settings and extensions will be kept.")
 			if err != nil {
@@ -250,16 +242,12 @@ func ensurePiWebSearchPackageWithStatus(bin string, status *piLaunchStatus) {
 
 	installed, err := piPackageInstalled(bin, piWebSearchSource)
 	if err != nil {
-		status.StopAndClear()
-		fmt.Fprintf(os.Stderr, "%s  Warning: could not check %s installation: %v%s\n", ansiYellow, piWebSearchPkg, err, ansiReset)
 		return
 	}
 
 	if !installed {
 		status.Set("Installing " + piWebSearchPkg + "...")
 		if err := runQuietCommand(bin, "install", piWebSearchSource); err != nil {
-			status.StopAndClear()
-			fmt.Fprintf(os.Stderr, "%s  Warning: could not install %s: %v%s\n", ansiYellow, piWebSearchPkg, err, ansiReset)
 			return
 		}
 		return
@@ -267,8 +255,6 @@ func ensurePiWebSearchPackageWithStatus(bin string, status *piLaunchStatus) {
 
 	status.Set("Updating " + piWebSearchPkg + "...")
 	if err := runQuietCommand(bin, "update", piWebSearchSource); err != nil {
-		status.StopAndClear()
-		fmt.Fprintf(os.Stderr, "%s  Warning: could not update %s: %v%s\n", ansiYellow, piWebSearchPkg, err, ansiReset)
 		return
 	}
 }

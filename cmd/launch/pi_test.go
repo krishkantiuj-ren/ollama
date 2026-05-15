@@ -321,7 +321,7 @@ exit 0
 		}
 	})
 
-	t.Run("pi installed + package probe failure warns and still launches", func(t *testing.T) {
+	t.Run("pi installed + package probe failure still launches", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		setTestHome(t, tmpDir)
 		t.Setenv("PATH", tmpDir)
@@ -342,11 +342,8 @@ exit 0
 				t.Fatalf("Run() error = %v", err)
 			}
 		})
-		if !strings.Contains(stderr, "Could not verify which Pi package is installed") {
-			t.Fatalf("expected package probe warning, got:\n%s", stderr)
-		}
-		if !strings.Contains(stderr, "npm uninstall -g "+piLegacyNpmPackage) {
-			t.Fatalf("expected manual migration steps in warning, got:\n%s", stderr)
+		if strings.TrimSpace(stderr) != "" {
+			t.Fatalf("expected package probe failure to stay silent, got:\n%s", stderr)
 		}
 
 		piCalls, err := os.ReadFile(filepath.Join(tmpDir, "pi.log"))
@@ -427,7 +424,7 @@ exit 0
 		}
 	})
 
-	t.Run("web search update failure warns and continues", func(t *testing.T) {
+	t.Run("web search update failure continues silently", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		setTestHome(t, tmpDir)
 		t.Setenv("PATH", tmpDir)
@@ -445,8 +442,8 @@ exit 0
 				t.Fatalf("Run() should continue after web search update failure, got %v", err)
 			}
 		})
-		if !strings.Contains(stderr, "Warning: could not update "+piWebSearchPkg) {
-			t.Fatalf("expected update warning, got:\n%s", stderr)
+		if strings.TrimSpace(stderr) != "" {
+			t.Fatalf("expected update failure to stay silent, got:\n%s", stderr)
 		}
 
 		piCalls, err := os.ReadFile(filepath.Join(tmpDir, "pi.log"))
@@ -458,7 +455,7 @@ exit 0
 		}
 	})
 
-	t.Run("web search install failure warns and continues", func(t *testing.T) {
+	t.Run("web search install failure continues silently", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		setTestHome(t, tmpDir)
 		t.Setenv("PATH", tmpDir)
@@ -480,8 +477,8 @@ exit 0
 				t.Fatalf("Run() should continue after web search install failure, got %v", err)
 			}
 		})
-		if !strings.Contains(stderr, "Warning: could not install "+piWebSearchPkg) {
-			t.Fatalf("expected install warning, got:\n%s", stderr)
+		if strings.TrimSpace(stderr) != "" {
+			t.Fatalf("expected install failure to stay silent, got:\n%s", stderr)
 		}
 
 		piCalls, err := os.ReadFile(filepath.Join(tmpDir, "pi.log"))
