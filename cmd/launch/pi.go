@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/cmd/internal/fileutil"
@@ -30,6 +32,8 @@ const (
 )
 
 func (p *Pi) String() string { return "Pi" }
+
+var npmRegistryBaseURL = "https://registry.npmjs.org"
 
 func (p *Pi) Run(model string, args []string) error {
 	status := newPiLaunchStatus()
@@ -240,16 +244,21 @@ func ensurePiWebSearchPackageWithStatus(bin string, status *piLaunchStatus) {
 
 	status.Set("Checking Pi web search package...")
 
-	installed, err := piPackageInstalled(bin, piWebSearchSource)
+	pkg, err := piPackageInfo(bin, piWebSearchSource)
 	if err != nil {
 		return
 	}
 
-	if !installed {
+	if !pkg.installed {
 		status.Set("Installing " + piWebSearchPkg + "...")
 		if err := runQuietCommand(bin, "install", piWebSearchSource); err != nil {
 			return
 		}
+		return
+	}
+
+	updateAvailable, err := piWebSearchUpdateAvailable(pkg.installedPath)
+	if err != nil || !updateAvailable {
 		return
 	}
 
@@ -272,25 +281,108 @@ func shouldManagePiWebSearch() bool {
 	return true
 }
 
-func piPackageInstalled(bin, source string) (bool, error) {
+type piPackageListEntry struct {
+	installed     bool
+	installedPath string
+}
+
+func piPackageInfo(bin, source string) (piPackageListEntry, error) {
 	cmd := exec.Command(bin, "list")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
-			return false, err
+			return piPackageListEntry{}, err
 		}
-		return false, fmt.Errorf("%w: %s", err, msg)
+		return piPackageListEntry{}, fmt.Errorf("%w: %s", err, msg)
 	}
 
-	for _, line := range strings.Split(string(out), "\n") {
+	lines := strings.Split(string(out), "\n")
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, source) {
-			return true, nil
+			return piPackageListEntry{installed: true, installedPath: piPackageListInstalledPath(lines[i+1:])}, nil
 		}
 	}
 
-	return false, nil
+	return piPackageListEntry{}, nil
+}
+
+func piPackageListInstalledPath(lines []string) string {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "npm:") || strings.HasPrefix(trimmed, "git:") || strings.HasSuffix(trimmed, ":") {
+			return ""
+		}
+		if filepath.IsAbs(trimmed) {
+			return trimmed
+		}
+		return ""
+	}
+	return ""
+}
+
+func piWebSearchUpdateAvailable(installedPath string) (bool, error) {
+	if piOfflineModeEnabled() || installedPath == "" {
+		return false, nil
+	}
+
+	installedVersion, err := npmInstalledPackageVersion(installedPath)
+	if err != nil || installedVersion == "" {
+		return false, err
+	}
+
+	latestVersion, err := npmLatestPackageVersion(piWebSearchPkg)
+	if err != nil || latestVersion == "" {
+		return false, err
+	}
+
+	return latestVersion != installedVersion, nil
+}
+
+func piOfflineModeEnabled() bool {
+	value := os.Getenv("PI_OFFLINE")
+	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
+}
+
+func npmInstalledPackageVersion(installedPath string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(installedPath, "package.json"))
+	if err != nil {
+		return "", err
+	}
+
+	var payload struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", err
+	}
+	return payload.Version, nil
+}
+
+func npmLatestPackageVersion(pkg string) (string, error) {
+	client := http.Client{Timeout: 10 * time.Second}
+	requestURL := strings.TrimRight(npmRegistryBaseURL, "/") + "/" + url.PathEscape(pkg) + "/latest"
+	resp, err := client.Get(requestURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("npm registry returned %s", resp.Status)
+	}
+
+	var payload struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", err
+	}
+	return payload.Version, nil
 }
 
 func (p *Pi) Paths() []string {
