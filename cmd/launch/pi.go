@@ -39,12 +39,12 @@ func (p *Pi) Run(model string, args []string) error {
 	status := newPiLaunchStatus()
 	defer status.StopAndClear()
 
-	status.Set("Preparing Pi...")
+	status.Set()
 	if err := ensureNpmInstalled(); err != nil {
 		return err
 	}
 
-	status.Set("Checking Pi installation...")
+	status.Set()
 	bin, err := ensurePiInstalledWithStatus(status)
 	if err != nil {
 		return err
@@ -52,7 +52,7 @@ func (p *Pi) Run(model string, args []string) error {
 
 	ensurePiWebSearchPackageWithStatus(bin, status)
 
-	status.Set("Launching Pi...")
+	status.Set()
 	status.StopAndClear()
 
 	cmd := exec.Command(bin, args...)
@@ -71,7 +71,7 @@ func newPiLaunchStatus() *piLaunchStatus {
 	return &piLaunchStatus{}
 }
 
-func (s *piLaunchStatus) Set(message string) {
+func (s *piLaunchStatus) Set() {
 	if s == nil || !term.IsTerminal(int(os.Stderr.Fd())) {
 		return
 	}
@@ -107,7 +107,7 @@ func ensurePiInstalledWithStatus(status *piLaunchStatus) (string, error) {
 	if _, err := exec.LookPath("pi"); err == nil {
 		install, pkgErr := installedPiPackageInfo()
 		if pkgErr == nil && install.packageName == piLegacyNpmPackage {
-			status.Set("Updating Pi...")
+			status.Set()
 			if err := migrateLegacyPiPackage(install.npmPrefix); err != nil {
 				return "", err
 			}
@@ -124,7 +124,7 @@ func ensurePiInstalledWithStatus(status *piLaunchStatus) (string, error) {
 
 	install, pkgErr := installedPiPackageInfo()
 	if pkgErr == nil && install.packageName == piLegacyNpmPackage {
-		status.Set("Updating Pi...")
+		status.Set()
 		if err := migrateLegacyPiPackage(install.npmPrefix); err != nil {
 			return "", err
 		}
@@ -134,7 +134,7 @@ func ensurePiInstalledWithStatus(status *piLaunchStatus) (string, error) {
 		return "pi", nil
 	}
 	if pkgErr == nil && install.packageName == piNpmPackage {
-		status.Set("Installing Pi...")
+		status.Set()
 		if err := installPiPackageWithPrefix(install.npmPrefix); err != nil {
 			return "", err
 		}
@@ -153,7 +153,7 @@ func ensurePiInstalledWithStatus(status *piLaunchStatus) (string, error) {
 		return "", fmt.Errorf("pi installation cancelled")
 	}
 
-	status.Set("Installing Pi...")
+	status.Set()
 	if err := installPiPackage(); err != nil {
 		return "", err
 	}
@@ -306,6 +306,7 @@ func npmPrefixForPackageRoot(packageRoot string) string {
 	if filepath.Base(libDir) != "lib" {
 		return ""
 	}
+	// npm --prefix expects the global prefix whose root is <prefix>/lib/node_modules.
 	return filepath.Dir(libDir)
 }
 
@@ -359,7 +360,7 @@ func ensurePiWebSearchPackageWithStatus(bin string, status *piLaunchStatus) {
 		return
 	}
 
-	status.Set("Checking Pi web search package...")
+	status.Set()
 
 	pkg, err := piPackageInfo(bin, piWebSearchSource)
 	if err != nil {
@@ -367,7 +368,7 @@ func ensurePiWebSearchPackageWithStatus(bin string, status *piLaunchStatus) {
 	}
 
 	if !pkg.installed {
-		status.Set("Installing " + piWebSearchPkg + "...")
+		status.Set()
 		if err := runQuietCommand(bin, "install", piWebSearchSource); err != nil {
 			return
 		}
@@ -379,7 +380,7 @@ func ensurePiWebSearchPackageWithStatus(bin string, status *piLaunchStatus) {
 		return
 	}
 
-	status.Set("Updating " + piWebSearchPkg + "...")
+	status.Set()
 	if err := runQuietCommand(bin, "update", piWebSearchSource); err != nil {
 		return
 	}
